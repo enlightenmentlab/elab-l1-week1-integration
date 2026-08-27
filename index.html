@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+  <!--
+    ELab quiz launcher — L1 Week 1 Integration
+  Course content lives in content.html (sibling file; assets/ and lib/ stay at repo
+  root next to it) and is a straight Articulate Rise export.
+  Everything that talks to n8n, Supabase, and Circle lives in this file.
+
+    Contract:
+    posts to  https://n8n.enlightenmentlab.life/webhook/scorm-postback
+    course id l1-week1-netlify
+      params    user_email (required, no email means no result is sent), user_name, return
+
+    Scoring reads the rendered Rise DOM. It depends on these selectors:
+    button[data-continue-btn], .quiz-card, .quiz-card__title,
+          .quiz-card__feedback-label, .quiz-multiple-choice-option.is-selected,
+          .quiz-multiple-response-option--selected, .matching-results-item
+        Re-check that list against content.html whenever the Rise export is replaced.
+  -->
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ELab Quiz — L1 Week 1 Integration</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #1f0334; }
+    body { display: flex; flex-direction: column; }
+
+    #quiz-frame {
+      flex: 1;
+      width: 100%;
+      min-height: 600px;
+      border: none;
+}
+
+    #loading {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #1f0334;
+      color: #f1e9cf;
+            z-index: 100;
+      font-family: sans-serif;
+}
+
+    #loading .spinner {
+      width: 50px; height: 50px;
+      border: 4px solid rgba(0,166,158,0.2);
+      border-top-color: #00a69e;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 24px;
+}
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading .text { font-size: 16px; color: #c7bbdc; text-align: center; }
+  </style>
+      </head>
+      <body>
+
+        <div id="loading">
+          <div class="spinner"></div>
+          <div class="text">Loading quiz...</div>
+        </div>
+
+        <iframe id="quiz-frame" src="content.html"></iframe>
+
+
+        <script>
+          const N8N_WEBHOOK = 'https://n8n.enlightenmentlab.life/webhook/scorm-postback';
+    const COURSE_ID   = 'l1-week1-netlify';
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const userEmail = urlParams.get('user_email') || '';
+    const userName  = urlParams.get('user_name')  || '';
+    const returnUrl = urlParams.get('return') || 'https://www.enlightenmentlab.life/c/level-1/sections/977323/lessons/4222306';
+
+    let completionSent = false;
+
+    const frame      = document.getElementById('quiz-frame');
+    const loadingDiv = document.getElementById('loading');
+
+    console.log('[QUIZ] User:', userEmail);
+    console.log('[QUIZ] Return:', returnUrl);
+
+    frame.addEventListener('load', function() {
+      setTimeout(() => { loadingDiv.style.display = 'none'; }, 500);
+      listenForEndButton();
+});
+
+    function listenForEndButton() {
+      try {
+        const quizDoc = frame.contentDocument || frame.contentWindow.document;
+
+        const observer = new MutationObserver(function() {
+          const endBtn = quizDoc.querySelector('button[data-continue-btn]');
+
+          if (endBtn && !endBtn.__elab_listener) {
+            endBtn.__elab_listener = true;
+
+            endBtn.addEventListener('click', function() {
+              console.log('[QUIZ] END button clicked!');
+              setTimeout(function() {
+                const scoreData = extractScore(quizDoc);
+                sendCompletion(scoreData);
+}, 300);
+});
+
+            console.log('[QUIZ] END button listener attached!');
+}
+});
+
+        observer.observe(quizDoc.body, { childList: true, subtree: true });
+        console.log('[QUIZ] Watching for END button...');
+
+} catch(err) {
+        console.error('[QUIZ] DOM access error:', err);
+}
+}
+
+    function extractScore(quizDoc) {
+      const results = {
+        questions: [],
+                  totalQuestions: 0,
+                  totalCorrect: 0,
+                  totalIncorrect: 0,
+                  score: 0
+          };
+
+      try {
+        const cards = quizDoc.querySelectorAll('.quiz-card');
+
+        cards.forEach(function(card) {
+                    const titleEl = card.querySelector('.quiz-card__title');
+                    const question = titleEl ? titleEl.textContent.trim() : 'Unknown';
+
+          const feedbackLabel = card.querySelector('.quiz-card__feedback-label');
+          if (!feedbackLabel) return;
+
+          const isCorrect = feedbackLabel.textContent.trim().toLowerCase() === 'correct';
+
+          let userAnswer = '';
+          const selectedOption = card.querySelector(
+            '.quiz-multiple-choice-option.is-selected, ' +
+            '.quiz-multiple-response-option--selected, ' +
+            '.matching-results-item'
+          );
+          if (selectedOption) {
+            const textEl = selectedOption.querySelector(
+              '.quiz-multiple-choice-option__text, ' +
+              '.quiz-multiple-response-option__text, ' +
+              '.matching-results-item-piece-content'
+            );
+            if (textEl) userAnswer = textEl.textContent.trim();
+}
+
+          results.questions.push({
+            question: question,
+            correct: isCorrect,
+            userAnswer: userAnswer
+});
+
+          if (isCorrect) {
+            results.totalCorrect++;
+} else {
+            results.totalIncorrect++;
+}
+});
+
+        results.totalQuestions = results.questions.length;
+        results.score = results.totalQuestions > 0
+          ? Math.round((results.totalCorrect / results.totalQuestions) * 100) / 100
+          : 1.0;
+
+        console.log('[QUIZ] Score extracted:', results.totalCorrect + '/' + results.totalQuestions);
+
+} catch(err) {
+        console.error('[QUIZ] Score extraction error:', err);
+        results.score = 1.0;
+}
+
+      return results;
+}
+
+    async function sendCompletion(scoreData) {
+      if (completionSent) return;
+
+      if (!userEmail) {
+        console.error('[QUIZ] No user email!');
+        return;
+}
+
+      completionSent = true;
+
+      loadingDiv.style.display = 'flex';
+      loadingDiv.querySelector('.text').textContent = 'Saving your progress...';
+
+      const payload = {
+        learner: {
+          id: userEmail,
+          email: userEmail,
+          firstName: userName.split(' ')[0] || '',
+          lastName: userName.split(' ').slice(1).join(' ') || ''
+},
+        courseId: COURSE_ID,
+        registrationId: 'netlify_' + Date.now(),
+        completionStatus: 'COMPLETED',
+        registrationSuccess: scoreData.score >= 0.7 ? 'PASSED' : 'FAILED',
+        score: {
+          scaled: scoreData.score,
+          raw: scoreData.totalCorrect,
+          max: scoreData.totalQuestions
+},
+        source: 'netlify',
+        trigger: 'end_button',
+        quizResults: {
+          totalQuestions: scoreData.totalQuestions,
+          totalCorrect: scoreData.totalCorrect,
+          totalIncorrect: scoreData.totalIncorrect,
+          questions: scoreData.questions
+}
+};
+
+      console.log('[QUIZ] Payload:', JSON.stringify(payload, null, 2));
+
+      try {
+        const res = await fetch(N8N_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+});
+
+        if (res.ok) {
+          console.log('[QUIZ] Sent to n8n!');
+          loadingDiv.querySelector('.text').textContent = 'Complete! Redirecting...';
+          loadingDiv.querySelector('.text').style.color = '#00a69e';
+
+          setTimeout(() => {
+            window.top.location.href = returnUrl;
+}, 1500);
+
+} else {
+          throw new Error('HTTP ' + res.status);
+}
+
+} catch(err) {
+        console.error('[QUIZ] Error:', err);
+        loadingDiv.querySelector('.text').textContent = 'Redirecting...';
+        setTimeout(() => {
+          window.top.location.href = returnUrl;
+}, 2000);
+}
+}
+  </script>
+</body>
+</html>
